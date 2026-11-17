@@ -1,0 +1,413 @@
+FeatureScript 3112;
+import(path : "onshape/std/common.fs", version : "3112.0");
+
+// MTG card sorter: builds the whole machine with configurable total stations, symmetric spacing, and 3/8" rods.
+
+// ---------- Cards, tray, bins (Fixed dimensions) ----------
+const CARD_W = 63;
+const CARD_L = 88;
+const STACK_H = 30;            // 100 cards
+const BIN_IN_X = 70;
+const BIN_IN_Y = 95;
+const BIN_WALL = 2;
+const BIN_H = 40;              // wall top
+const BIN_FLOOR = 2;           // floor thickness (below Z = 0)
+const CUP_Y = -CARD_L / 2 + 20; // cup sits 20 mm in from the front short edge
+
+// ---------- Bought hardware ----------
+const ROD_D = (3.0 / 8.0) * inch / millimeter; // 3/8 inch (~9.525 mm)
+const BRG_D = 15;              // LM8UU outside diameter
+const NEMA = 42.3;             // NEMA 17 body width
+
+// ---------- Layout constants ----------
+const Y_Z = 64;                // plane of the Z rods and lead screw
+const Z_ROD_DX = 20;           // Z rods are this far left/right of the lead screw
+const Y_PLATE = 78;            // front face of the X carriage plate
+const PLATE_T = 6;
+const Y_XROD = 100;            // the two X rods
+const XROD_Z1 = 70;
+const XROD_Z2 = 150;
+const XROD_X0 = -54;           // left rail start
+const Y_BELT = 117;            // belt plane
+const BELT_Z = 110;            // pulley center height
+const PITCH_R = 6.37;          // GT2 20-tooth pitch radius
+const POST_Y0 = 60;            // 2020 posts
+const POST_Y1 = 80;
+const POST_TOP = 170;
+const END_L = [-58, -38];      // x range of left end block
+const FLANGE_BOT = [36, 44];   // z range of X carriage bottom flange
+const FLANGE_TOP = [178, 186]; // z range of top flange
+const MOTOR_X = -48;           // X motor center
+
+const RED = color(0.85, 0.35, 0.3);
+const ORANGE = color(0.9, 0.5, 0.1); // Distinct color for source tray
+const BLUE = color(0.2, 0.45, 0.85);
+const GREEN = color(0.25, 0.7, 0.4);
+const YELLOW = color(0.95, 0.75, 0.2);
+const PURPLE = color(0.55, 0.3, 0.75);
+const WOOD = color(0.8, 0.7, 0.5);
+const GRAY = color(0.6, 0.6, 0.62);
+
+const HEAD_X_BOUNDS = { (millimeter) : [0, 150, 900] } as LengthBoundSpec;
+const HEAD_Z_BOUNDS = { (millimeter) : [-2, 45, 60] } as LengthBoundSpec;
+const CLEARANCE_BOUNDS = { (millimeter) : [0, 0.2, 1] } as LengthBoundSpec;
+const BIN_SPACING_BOUNDS = { (millimeter) : [100, 150, 250] } as LengthBoundSpec;
+const NUM_BINS_BOUNDS = { (unitless) : [2, 3, 7] } as IntegerBoundSpec;
+
+annotation { "Feature Type Name" : "MTG card sorter" }
+export const mtgCardSorter = defineFeature(function(context is Context, id is Id, definition is map)
+    precondition
+    {
+        annotation { "Name" : "Head X position" }
+        isLength(definition.headX, HEAD_X_BOUNDS);
+
+        annotation { "Name" : "Head Z (cup tip height)" }
+        isLength(definition.headZ, HEAD_Z_BOUNDS);
+
+        annotation { "Name" : "Hole clearance" }
+        isLength(definition.clearance, CLEARANCE_BOUNDS);
+
+        annotation { "Name" : "Bin Spacing (distance between stations)" }
+        isLength(definition.binSpacing, BIN_SPACING_BOUNDS);
+
+        annotation { "Name" : "Total Bins & Stations (Bins + Tray)" }
+        isInteger(definition.numBins, NUM_BINS_BOUNDS);
+
+        annotation { "Name" : "Show bought parts and cards", "Default" : true }
+        definition.showReference is boolean;
+    }
+    {
+        const X = definition.headX / millimeter;
+        const Z = definition.headZ / millimeter;
+        const c = definition.clearance / millimeter;
+        const spacing = definition.binSpacing / millimeter;
+        const totalStations = definition.numBins;
+
+        // Max extent based on total stations
+        const maxStationX = (totalStations - 1) * spacing;
+        
+        // Symmetrical right end block positioning
+        const endR = [maxStationX + 38, maxStationX + 58];
+        const maxX = maxStationX + 78;
+        const idlerX = maxStationX + 48;
+        const xrodX1 = maxStationX + 54;
+
+        // Place bins and source tray across the stations (Index 1 is Source Tray)
+        const binNames = ["Bin A", "Bin B", "Bin C", "Bin D", "Bin E", "Bin F", "Bin G"];
+        var sortingBinIdx = 0;
+        
+        for (var i = 0; i < totalStations; i += 1)
+        {
+            const xc = i * spacing;
+            if (i == 1)
+            {
+                trayPart(context, id + "tray", "Source tray", xc);
+            }
+            else
+            {
+                binPart(context, id + ("bin" ~ sortingBinIdx), binNames[sortingBinIdx], xc);
+                sortingBinIdx += 1;
+            }
+        }
+
+        xCarriage(context, id + "xcar", X, c);
+        zCarriage(context, id + "zcar", X, Z, c);
+        plunger(context, id + "plunger", X, Z);
+        endBlock(context, id + "endL", false, c, endR);
+        endBlock(context, id + "endR", true, c, endR);
+        deck(context, id + "deck", spacing, totalStations, endR, maxX);
+        
+        if (definition.showReference)
+            reference(context, id + "ref", X, Z, spacing, endR, xrodX1, idlerX, maxX);
+    });
+
+// ---------- Printed parts ----------
+
+function binPart(context is Context, id is Id, name is string, xc is number)
+{
+    const p = newPart(id);
+    const ox = BIN_IN_X / 2 + BIN_WALL;
+    const oy = BIN_IN_Y / 2 + BIN_WALL;
+    addBox(context, p, vector(xc - ox, -oy, -BIN_FLOOR), vector(xc + ox, oy, BIN_H));
+    cutBox(context, p, vector(xc - BIN_IN_X / 2, -BIN_IN_Y / 2, 0), vector(xc + BIN_IN_X / 2, BIN_IN_Y / 2, BIN_H + 1));
+    finishPart(context, p, name, RED, true);
+}
+
+function trayPart(context is Context, id is Id, name is string, xc is number)
+{
+    const p = newPart(id);
+    const ox = BIN_IN_X / 2 + BIN_WALL;
+    const oy = BIN_IN_Y / 2 + BIN_WALL;
+    addBox(context, p, vector(xc - ox, -oy, -BIN_FLOOR), vector(xc + ox, oy, BIN_H));
+    cutBox(context, p, vector(xc - BIN_IN_X / 2, -BIN_IN_Y / 2, 0), vector(xc + BIN_IN_X / 2, BIN_IN_Y / 2, BIN_H + 1));
+    finishPart(context, p, name, ORANGE, true);
+}
+
+function xCarriage(context is Context, id is Id, X is number, c is number)
+{
+    const p = newPart(id);
+    addBox(context, p, vector(X - 36, Y_PLATE, FLANGE_BOT[0]), vector(X + 36, Y_PLATE + PLATE_T, FLANGE_TOP[1]));
+    addBox(context, p, vector(X - 32, Y_Z - 12, FLANGE_BOT[0]), vector(X + 32, Y_PLATE, FLANGE_BOT[1]));
+    addBox(context, p, vector(X - 32, Y_Z - 24, FLANGE_TOP[0]), vector(X + 32, Y_PLATE, FLANGE_TOP[1]));
+    for (var s in [-1, 1])
+    {
+        for (var fl in [FLANGE_BOT, FLANGE_TOP])
+        {
+            cutCyl(context, p, vector(X + s * Z_ROD_DX, Y_Z, fl[0] - 1), vector(X + s * Z_ROD_DX, Y_Z, fl[1] + 1), ROD_D + c);
+        }
+    }
+    cutCyl(context, p, vector(X, Y_Z, FLANGE_BOT[0] - 1), vector(X, Y_Z, FLANGE_BOT[1] + 1), 10);
+    cutCyl(context, p, vector(X, Y_Z, FLANGE_TOP[0] - 1), vector(X, Y_Z, FLANGE_TOP[1] + 1), 22.5);
+    for (var sx in [-1, 1])
+    {
+        for (var sy in [-1, 1])
+        {
+            cutCyl(context, p, vector(X + sx * 15.5, Y_Z + sy * 15.5, FLANGE_TOP[0] - 1),
+                    vector(X + sx * 15.5, Y_Z + sy * 15.5, FLANGE_TOP[1] + 1), 3.4);
+        }
+    }
+    for (var zr in [XROD_Z1, XROD_Z2])
+    {
+        for (var s in [-1, 1])
+        {
+            const x0 = s > 0 ? X + 10 : X - 34;
+            const x1 = s > 0 ? X + 34 : X - 10;
+            addBox(context, p, vector(x0, Y_PLATE + PLATE_T - 1, zr - 10.5), vector(x1, Y_XROD, zr + 10.5));
+            addCyl(context, p, vector(x0, Y_XROD, zr), vector(x1, Y_XROD, zr), BRG_D + 6);
+            cutCyl(context, p, vector(x0 - 1, Y_XROD, zr), vector(x1 + 1, Y_XROD, zr), BRG_D + c);
+        }
+    }
+    const zb = BELT_Z + PITCH_R;
+    addBox(context, p, vector(X - 10, Y_PLATE + PLATE_T - 1, BELT_Z), vector(X + 10, Y_BELT + 7, BELT_Z + 14));
+    cutBox(context, p, vector(X - 11, Y_BELT - 3.5, zb - 1), vector(X + 11, Y_BELT + 3.5, zb + 1));
+    for (var s in [-1, 1])
+    {
+        cutBox(context, p, vector(X + s * 6 - 1.5, Y_BELT - 6, BELT_Z - 1), vector(X + s * 6 + 1.5, Y_BELT + 6, BELT_Z + 15));
+    }
+    addBox(context, p, vector(X + 25, Y_Z - 10, 150), vector(X + 28, Y_Z + 10, FLANGE_TOP[0] + 1));
+    for (var dy in [-4.75, 4.75])
+    {
+        cutCyl(context, p, vector(X + 24, Y_Z + dy, 160), vector(X + 29, Y_Z + dy, 160), 2.4);
+    }
+    finishPart(context, p, "X carriage", BLUE, true);
+}
+
+function zCarriage(context is Context, id is Id, X is number, Z is number, c is number)
+{
+    const p = newPart(id);
+    addBox(context, p, vector(X - 32, Y_Z - 12, Z + 48), vector(X + 32, Y_Z + 12, Z + 78));
+    for (var s in [-1, 1])
+    {
+        cutCyl(context, p, vector(X + s * Z_ROD_DX, Y_Z, Z + 47), vector(X + s * Z_ROD_DX, Y_Z, Z + 79), BRG_D + c);
+    }
+    cutCyl(context, p, vector(X, Y_Z, Z + 47), vector(X, Y_Z, Z + 79), 10.5);
+    for (var sx in [-1, 1])
+    {
+        for (var sy in [-1, 1])
+        {
+            cutCyl(context, p, vector(X + sx * 5.66, Y_Z + sy * 5.66, Z + 68), vector(X + sx * 5.66, Y_Z + sy * 5.66, Z + 79), 2.5);
+        }
+    }
+    addBox(context, p, vector(X - 8, CUP_Y, Z + 48), vector(X + 8, Y_Z - 11, Z + 56));
+    addCyl(context, p, vector(X, CUP_Y, Z + 28), vector(X, CUP_Y, Z + 58), 18);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 27), vector(X, CUP_Y, Z + 55), 10 + c);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 54), vector(X, CUP_Y, Z + 59), 3.5);
+    cutBox(context, p, vector(X + 3, CUP_Y - 1.75, Z + 33.3), vector(X + 10, CUP_Y + 1.75, Z + 40.2));
+    addBox(context, p, vector(X + 5, CUP_Y - 10, Z + 56), vector(X + 7, CUP_Y + 10, Z + 72));
+    for (var dy in [-4.75, 4.75])
+    {
+        cutCyl(context, p, vector(X + 4, CUP_Y + dy, Z + 66), vector(X + 8, CUP_Y + dy, Z + 66), 2.4);
+    }
+    finishPart(context, p, "Z carriage", GREEN, true);
+}
+
+function plunger(context is Context, id is Id, X is number, Z is number)
+{
+    const p = newPart(id);
+    addCyl(context, p, vector(X, CUP_Y, Z + 12), vector(X, CUP_Y, Z + 41), 10);
+    addCyl(context, p, vector(X, CUP_Y, Z + 41), vector(X, CUP_Y, Z + 60), 3);
+    addCyl(context, p, vector(X, CUP_Y, Z + 22), vector(X, CUP_Y + 13, Z + 22), 4.5);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 11), vector(X, CUP_Y, Z + 18), 4.2);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 17), vector(X, CUP_Y, Z + 23), 2.5);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 22), vector(X, CUP_Y + 14, Z + 22), 2.5);
+    cutCyl(context, p, vector(X, CUP_Y, Z + 35), vector(X + 6, CUP_Y, Z + 35), 2.5);
+    finishPart(context, p, "Plunger", YELLOW, true);
+}
+
+function endBlock(context is Context, id is Id, right is boolean, c is number, endR is array)
+{
+    const p = newPart(id);
+    const x0 = right ? endR[0] : END_L[0];
+    const x1 = right ? endR[1] : END_L[1];
+    const xm = (x0 + x1) / 2;
+    addBox(context, p, vector(x0, POST_Y1, 55), vector(x1, 112, POST_TOP));
+    for (var z in [80, 140])
+    {
+        cutCyl(context, p, vector(xm, POST_Y1 - 1, z), vector(xm, 113, z), 5.3);
+        cutCyl(context, p, vector(xm, 92, z), vector(xm, 113, z), 9.5);
+    }
+    for (var zr in [XROD_Z1, XROD_Z2])
+    {
+        const a = right ? x0 - 1 : x1 - 16;
+        const b = right ? x0 + 16 : x1 + 1;
+        cutCyl(context, p, vector(a, Y_XROD, zr), vector(b, Y_XROD, zr), ROD_D + c);
+    }
+    cutCyl(context, p, vector(xm, Y_XROD, 54), vector(xm, Y_XROD, XROD_Z1), 2.5);
+    cutCyl(context, p, vector(xm, Y_XROD, XROD_Z2), vector(xm, Y_XROD, POST_TOP + 1), 2.5);
+    addBox(context, p, vector(xm - 25, 124, 85), vector(xm + 25, 129, 135));
+    addBox(context, p, vector(x0, 111, 85), vector(x1, 124, 95));
+    addBox(context, p, vector(x0, 111, 125), vector(x1, 124, 135));
+    if (right)
+    {
+        cutCyl(context, p, vector(xm, 99, BELT_Z), vector(xm, 130, BELT_Z), 5.3);
+    }
+    else
+    {
+        cutBox(context, p, vector(x0 - 1, 103, 98), vector(x1 + 1, 113, 122));
+        cutCyl(context, p, vector(xm, 123, BELT_Z), vector(xm, 130, BELT_Z), 22.5);
+        for (var sx in [-1, 1])
+        {
+            for (var sz in [-1, 1])
+            {
+                cutCyl(context, p, vector(xm + sx * 15.5, 123, BELT_Z + sz * 15.5), vector(xm + sx * 15.5, 130, BELT_Z + sz * 15.5), 3.4);
+            }
+        }
+        addBox(context, p, vector(x0, POST_Y1, POST_TOP - 1), vector(x0 + 6, POST_Y1 + 16, POST_TOP + 15));
+        for (var dy in [-4.75, 4.75])
+        {
+            cutCyl(context, p, vector(x0 - 1, POST_Y1 + 8 + dy, POST_TOP + 9), vector(x0 + 7, POST_Y1 + 8 + dy, POST_TOP + 9), 2.4);
+        }
+    }
+    finishPart(context, p, right ? "End block R (idler)" : "End block L (motor)", PURPLE, true);
+}
+
+function deck(context is Context, id is Id, spacing is number, totalStations is number, endR is array, maxX is number)
+{
+    const p = newPart(id);
+    addBox(context, p, vector(-80, -60, -8), vector(maxX, 80, -2));
+    for (var e in [END_L, endR])
+    {
+        cutBox(context, p, vector(e[0] - 0.5, POST_Y0 - 0.5, -9), vector(e[1] + 0.5, 81, -1));
+    }
+    for (var h in [[-65, -40], [maxX - 20, -40], [spacing, 70], [spacing * 2, 70]])
+    {
+        cutCyl(context, p, vector(h[0], h[1], -9), vector(h[0], h[1], -1), 5.3);
+    }
+    finishPart(context, p, "Deck (laser-cut 6 mm)", WOOD, true);
+}
+
+// Bought reference parts
+function reference(context is Context, id is Id, X is number, Z is number, spacing is number, endR is array, xrodX1 is number, idlerX is number, maxX is number)
+{
+    var p = newPart(id + "rails");
+    addBox(context, p, vector(-80, -50, -28), vector(maxX, -30, -8));
+    addBox(context, p, vector(-80, POST_Y0, -28), vector(maxX, POST_Y1, -8));
+    finishPart(context, p, "Rails", GRAY, false);
+
+    p = newPart(id + "posts");
+    for (var e in [END_L, endR])
+    {
+        addBox(context, p, vector(e[0], POST_Y0, -8), vector(e[1], POST_Y1, POST_TOP));
+    }
+    finishPart(context, p, "Posts", GRAY, false);
+
+    p = newPart(id + "xrods");
+    for (var zr in [XROD_Z1, XROD_Z2])
+    {
+        addCyl(context, p, vector(XROD_X0, Y_XROD, zr), vector(xrodX1, Y_XROD, zr), ROD_D);
+    }
+    finishPart(context, p, "X rods", GRAY, false);
+
+    p = newPart(id + "zrods");
+    for (var s in [-1, 1])
+    {
+        addCyl(context, p, vector(X + s * Z_ROD_DX, Y_Z, FLANGE_BOT[0]), vector(X + s * Z_ROD_DX, Y_Z, FLANGE_BOT[0] + 150), ROD_D);
+    }
+    finishPart(context, p, "Z rods", GRAY, false);
+
+    p = newPart(id + "zmotor");
+    addBox(context, p, vector(X - NEMA / 2, Y_Z - NEMA / 2, FLANGE_TOP[1]), vector(X + NEMA / 2, Y_Z + NEMA / 2, FLANGE_TOP[1] + 40));
+    addCyl(context, p, vector(X, Y_Z, 153), vector(X, Y_Z, 178), 19);
+    addCyl(context, p, vector(X, Y_Z, 16), vector(X, Y_Z, 166), 8);
+    finishPart(context, p, "Z motor, coupler, lead screw", GRAY, false);
+
+    p = newPart(id + "xmotor");
+    addBox(context, p, vector(MOTOR_X - NEMA / 2, 129, BELT_Z - NEMA / 2), vector(MOTOR_X + NEMA / 2, 169, BELT_Z + NEMA / 2));
+    addCyl(context, p, vector(MOTOR_X, 105, BELT_Z), vector(MOTOR_X, 129, BELT_Z), 5);
+    addCyl(context, p, vector(MOTOR_X, 109, BELT_Z), vector(MOTOR_X, 125, BELT_Z), 16);
+    finishPart(context, p, "X motor + pulley", GRAY, true);
+
+    p = newPart(id + "idler");
+    addCyl(context, p, vector(idlerX, 113, BELT_Z), vector(idlerX, 121.5, BELT_Z), 18);
+    finishPart(context, p, "Idler", GRAY, false);
+
+    p = newPart(id + "cup");
+    addCyl(context, p, vector(X, CUP_Y, Z), vector(X, CUP_Y, Z + 12), 14);
+    finishPart(context, p, "Suction cup", GRAY, false);
+
+    p = newPart(id + "cards");
+    addBox(context, p, vector(spacing - CARD_W / 2, -CARD_L / 2, 0), vector(spacing + CARD_W / 2, CARD_L / 2, STACK_H));
+    finishPart(context, p, "Card stack", color(1, 1, 1), false);
+}
+
+// ---------- Helpers ----------
+
+function newPart(id is Id) returns map
+{
+    return { "id" : id, "n" : new box(0), "adds" : new box([]), "cuts" : new box([]) };
+}
+
+function nextId(p is map, kind is string) returns Id
+{
+    p.n[] = p.n[] + 1;
+    return p.id + (kind ~ "k" ~ p.n[]);
+}
+
+function addBox(context is Context, p is map, lo is Vector, hi is Vector)
+{
+    const opId = nextId(p, "add");
+    fCuboid(context, opId, { "corner1" : lo * millimeter, "corner2" : hi * millimeter });
+    p.adds[] = append(p.adds[], qCreatedBy(opId, EntityType.BODY));
+}
+
+function cutBox(context is Context, p is map, lo is Vector, hi is Vector)
+{
+    const opId = nextId(p, "cut");
+    fCuboid(context, opId, { "corner1" : lo * millimeter, "corner2" : hi * millimeter });
+    p.cuts[] = append(p.cuts[], qCreatedBy(opId, EntityType.BODY));
+}
+
+function addCyl(context is Context, p is map, a is Vector, b is Vector, d is number)
+{
+    const opId = nextId(p, "add");
+    fCylinder(context, opId, { "bottomCenter" : a * millimeter, "topCenter" : b * millimeter, "radius" : d / 2 * millimeter });
+    p.adds[] = append(p.adds[], qCreatedBy(opId, EntityType.BODY));
+}
+
+function cutCyl(context is Context, p is map, a is Vector, b is Vector, d is number)
+{
+    const opId = nextId(p, "cut");
+    fCylinder(context, opId, { "bottomCenter" : a * millimeter, "topCenter" : b * millimeter, "radius" : d / 2 * millimeter });
+    p.cuts[] = append(p.cuts[], qCreatedBy(opId, EntityType.BODY));
+}
+
+function finishPart(context is Context, p is map, name is string, col is Color, merge is boolean)
+{
+    const adds = qUnion(p.adds[]);
+    if (merge && size(evaluateQuery(context, adds)) > 1)
+    {
+        opBoolean(context, p.id + "union", { "tools" : adds, "operationType" : BooleanOperationType.UNION });
+    }
+    const cuts = qUnion(p.cuts[]);
+    if (size(evaluateQuery(context, cuts)) > 0)
+    {
+        opBoolean(context, p.id + "subtract", {
+            "tools" : cuts,
+            "targets" : qUnion(p.adds[]),
+            "operationType" : BooleanOperationType.SUBTRACTION
+        });
+    }
+    const bodies = qCreatedBy(p.id, EntityType.BODY);
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.NAME, "value" : name });
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.APPEARANCE, "value" : col });
+}
